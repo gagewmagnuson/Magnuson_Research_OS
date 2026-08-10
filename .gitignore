@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Env / secrets
+.env
+*.key
+
+# Research OS data — snapshots and trial artifacts are large and reproducible;
+# they are NOT source and never committed (ARCHITECTURE §5).
+snapshots/
+artifacts/
+*.parquet
+*.duckdb
+
+# OS
+.DS_Store
