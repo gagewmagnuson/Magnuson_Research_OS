@@ -3,7 +3,14 @@ name = "research_os"
 version = "0.0.0"
 description = "Magnuson Research OS — systematic alpha-search factory"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "psycopg[binary]>=3.1",   # PostgreSQL driver (v3), matching the Trading OS
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -11,3 +18,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
