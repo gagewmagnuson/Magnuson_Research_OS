@@ -174,4 +174,18 @@ Any transition not listed is illegal. `retired` is terminal. Changes to this gra
 
 **Rejected.** Allowing `universe_spec` to name a universe without binding it to the snapshot's PIT semantics — reintroduces exactly the survivorship/hindsight bias the whole system exists to prevent.
 
-*This log is append-only. New decisions are added as RD-011 onward; superseding entries reference the entry they replace and state why.*
+---
+
+## RD-015 — The snapshot content_hash is a SHA-256 over a canonical manifest of per-file hashes
+
+*2026-08-13*
+
+**Decision.** `research.snapshot.content_hash` is computed deterministically as follows. (1) For every Parquet file in the snapshot, compute its SHA-256 over the raw file bytes. (2) Form the pair `(relative_path, file_sha256)` for each file, where `relative_path` is the file's path relative to the snapshot root, using forward slashes. (3) Sort the pairs lexicographically by `relative_path`. (4) Serialize the sorted list together with the canonical snapshot manifest as a single UTF-8 JSON document with sorted keys and no insignificant whitespace (`json.dumps(obj, sort_keys=True, separators=(",", ":"))`). (5) The `content_hash` is the SHA-256 hex digest of that document. The manifest included in step (4) is itself the canonical manifest defined for `research.snapshot.manifest` (domains, universes, date ranges, per-domain row counts, feature versions, and `trading_os_as_of`). This closes the deferral recorded in RD-013.
+
+**Reasoning.** The reproducibility tuple's `data_as_of` resolves to a `snapshot_id`, and a snapshot's trustworthiness rests on `content_hash` being a stable, content-covering identity for the immutable artifact. Hashing per-file and then hashing the sorted manifest makes the result (a) deterministic and order-independent — filesystem enumeration order cannot change it; (b) content-covering — any change to any data byte changes a file hash, and any change to snapshot metadata changes the manifest, so both the data and its description are bound into one identity; (c) verifiable later — a re-hash of a stored snapshot either matches its registered `content_hash` or the snapshot has been altered. SHA-256 over raw bytes avoids any dependence on Parquet reader/writer versions or in-memory representations, so the hash is stable across environments (the cross-environment integrity property RD-013 required before reliance). The hash is computed in staging and registered as the final act of the pull, so a `research.snapshot` row exists only for a fully-assembled, hash-verified artifact (SCHEMA §5.1, "born complete").
+
+**Rejected.** (a) Hashing an in-memory concatenation of the data (e.g. a combined DataFrame) — depends on library version, column order, and serialization details, so it is not stable across environments. (b) Hashing only the manifest metadata (row counts, ranges) — cheap but not content-covering; two different datasets with identical shape would collide. (c) A per-file hash set without the manifest — covers data bytes but not the snapshot's declared semantics (which feature versions, which `as_of`), so a metadata error would not change the identity. (d) Deferring the algorithm further — the snapshot pull cannot register an integrity-bearing `content_hash` without it, so it must be fixed now, before the pull relies on it.
+
+---
+
+*This log is append-only. New decisions are added as RD-015 onward; superseding entries reference the entry they replace and state why.*
