@@ -14,17 +14,21 @@ from datetime import date
 
 @dataclass(frozen=True)
 class SnapshotRequest:
-    """The spec that defines what this snapshot was supposed to contain. The
-    request-derived checks verify the pulled data against this."""
-    as_of: date
+    """The spec that defines what this snapshot was supposed to contain.
+
+    A snapshot is ALL HISTORY as knowable at a single knowledge cutoff (`as_of`),
+    per ARCHITECTURE §3: "Every read composing a snapshot uses the same
+    as_of = snapshot_date, including the full history of bars." There is NO
+    session-date window — windowing is a read-time research concern, not a pull
+    parameter. The only temporal bound is the knowledge cutoff `as_of`.
+    """
+    as_of: date                        # the ONE knowledge cutoff = snapshot_date
     universe_code: str                 # e.g. 'SP500'
-    start: date
-    end: date
     feature_versions: list[dict]       # [{"name": "momentum_12_1", "version": 1}, ...]
     macro_series: list[str]            # e.g. ['CPIAUCSL', ...]
-    # Symbols may be specified explicitly (dev slice) or derived from the
-    # universe (full pull). When None, the expected symbol set is the universe
-    # membership as_of (resolved during the pull).
+    # Dev-slice restriction ONLY: restricts the PIT-membership population to a
+    # subset for development. Never an independent population definition (RD-014).
+    # None -> full universe membership as_of.
     requested_symbols: list[str] | None = None
 
 

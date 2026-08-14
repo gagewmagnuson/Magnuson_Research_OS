@@ -140,3 +140,9 @@ class TradingOsClient:
                       {"as_of": self._fmt(as_of)})
         return MacroResult(series_id=d["series_id"], as_of=d["as_of"],
                            count=d["count"], observations=d["observations"])
+
+    def health_dq(self) -> dict[str, Any]:
+        """Producer data-quality signal (provenance). Faithful passthrough of the
+        Trading OS /v1/health/dq response; the Research OS records it, never
+        recomputes it (RD-001 boundary)."""
+        return self._get("/v1/health/dq")

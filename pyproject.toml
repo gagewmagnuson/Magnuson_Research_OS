@@ -5,6 +5,7 @@ description = "Magnuson Research OS — systematic alpha-search factory"
 requires-python = ">=3.13"
 dependencies = [
     "psycopg[binary]>=3.1",   # PostgreSQL driver (v3), matching the Trading OS
+    "polars>=1.0",            # dataframe engine for snapshot staging/reading (stack choice)
 ]
 
 [project.optional-dependencies]
@@ -22,3 +23,6 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+    "slow: end-to-end tests that hit the live Trading OS and take minutes (deselect with -m 'not slow')",
+]
