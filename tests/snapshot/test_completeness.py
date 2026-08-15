@@ -18,14 +18,12 @@ from research_os.snapshot.completeness import (
 )
 
 AS_OF = date(2008, 6, 30)
-START = date(2008, 6, 2)
-END = date(2008, 6, 4)
 SESSIONS = [date(2008, 6, 2), date(2008, 6, 3), date(2008, 6, 4)]
 
 
 def _request(**over):
     base = dict(
-        as_of=AS_OF, universe_code="SP500", start=START, end=END,
+        as_of=AS_OF, universe_code="SP500",
         feature_versions=[{"name": "momentum_12_1", "version": 1}],
         macro_series=["CPIAUCSL"], requested_symbols=None,
     )

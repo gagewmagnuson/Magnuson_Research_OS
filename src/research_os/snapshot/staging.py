@@ -96,6 +96,26 @@ def write_universe(result: UniverseResult, staging_dir: Path) -> Path:
     return path
 
 
+def write_universe_history(intervals: list[dict], staging_dir: Path) -> Path:
+    """universe.parquet = the full membership INTERVAL history, keyed on
+    security_id (survivorship-free). Each row is one interval; a security may have
+    several. R1 reconstructs PIT membership locally by interval containment.
+    Identity is security_id; ticker is stored as a convenience attribute only."""
+    univ_schema = {
+        "security_id": pl.Int64, "valid_from": pl.Utf8,
+        "valid_to": pl.Utf8, "ticker": pl.Utf8,
+    }
+    rows = [{"security_id": iv["security_id"],
+             "valid_from": str(iv["valid_from"]) if iv.get("valid_from") else None,
+             "valid_to": str(iv["valid_to"]) if iv.get("valid_to") else None,
+             "ticker": iv.get("ticker")}
+            for iv in intervals]
+    df = pl.DataFrame(rows, schema=univ_schema) if rows else pl.DataFrame(schema=univ_schema)
+    path = staging_dir / UNIVERSE_FILE
+    _write(df, path)
+    return path
+
+
 def write_macro(results: list[MacroResult], staging_dir: Path) -> Path:
     rows = []
     for r in results:

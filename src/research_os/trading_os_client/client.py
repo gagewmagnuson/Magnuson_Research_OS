@@ -64,6 +64,15 @@ class UniverseResult:
 
 
 @dataclass(frozen=True)
+class UniverseHistoryResult:
+    index: str
+    as_of: str
+    interval_count: int
+    security_count: int
+    intervals: list[dict[str, Any]]      # each: security_id, valid_from, valid_to
+
+
+@dataclass(frozen=True)
 class MacroResult:
     series_id: str
     as_of: str
@@ -134,6 +143,18 @@ class TradingOsClient:
                       {"as_of": self._fmt(as_of)})
         return UniverseResult(index=d["index"], as_of=d["as_of"],
                               count=d["count"], members=d["members"])
+
+    def universe_history(self, index: str, as_of: date | str) -> UniverseHistoryResult:
+        """Full survivorship-free membership interval history for an index — every
+        security ever a member (including delisted), every interval. Faithful
+        transport: preserves counts and intervals verbatim."""
+        d = self._get(f"/v1/universe/{urllib.parse.quote(index)}/history",
+                      {"as_of": self._fmt(as_of)})
+        return UniverseHistoryResult(
+            index=d["index"], as_of=d["as_of"],
+            interval_count=d["interval_count"], security_count=d["security_count"],
+            intervals=d["intervals"],
+        )
 
     def macro(self, series: str, as_of: date | str) -> MacroResult:
         d = self._get(f"/v1/macro/{urllib.parse.quote(series)}",

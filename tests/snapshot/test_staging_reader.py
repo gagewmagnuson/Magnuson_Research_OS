@@ -44,6 +44,13 @@ def _universe_result(secs):
                           members=[{"security_id": sid, "symbol": sym} for sid, sym in secs])
 
 
+def _intervals(secs):
+    """Membership interval history (one open interval per security) — the shape
+    universe.parquet now holds. Identity is security_id; ticker is convenience."""
+    return [{"security_id": sid, "valid_from": "2000-01-01", "valid_to": None,
+             "ticker": sym} for sid, sym in secs]
+
+
 def _macro_result():
     return MacroResult(series_id="CPIAUCSL", as_of=str(AS_OF), count=2,
                        observations=[{"obs_date": "2008-05-01", "value": "218.8",
@@ -56,13 +63,13 @@ def test_round_trip_clean_snapshot(tmp_path):
     secs = [(1, "AAPL"), (2, "MSFT")]
     staging.write_bars([_bars_result(s, y) for s, y in secs], tmp_path)
     staging.write_gold(_features_result(secs), tmp_path)
-    staging.write_universe(_universe_result(secs), tmp_path)
+    staging.write_universe_history(_intervals(secs), tmp_path)
     staging.write_macro([_macro_result()], tmp_path)
 
     # read the STAGED artifact back
     data = reader.read_pulled_data(tmp_path, AS_OF, "SP500", features_unresolved=[])
 
-    # reconstruction sanity
+    # reconstruction sanity — members derived from the interval history (distinct sids)
     assert {b.security_id for b in data.bars} == {1, 2}
     assert {g.security_id for g in data.gold} == {1, 2}
     assert {m.security_id for m in data.members} == {1, 2}
@@ -71,7 +78,6 @@ def test_round_trip_clean_snapshot(tmp_path):
 
     # checks pass on the round-tripped artifact
     req = SnapshotRequest(as_of=AS_OF, universe_code="SP500",
-                          start=date(2008, 6, 2), end=date(2008, 6, 4),
                           feature_versions=[{"name": "momentum_12_1", "version": 1}],
                           macro_series=["CPIAUCSL"], requested_symbols=["AAPL", "MSFT"])
     assert blocking_violations(run_all_checks(data, req)) == []
@@ -82,13 +88,12 @@ def test_round_trip_detects_gold_gap(tmp_path):
     security, the reader+checks catch it on the STAGED artifact."""
     secs = [(1, "AAPL"), (2, "MSFT")]
     staging.write_bars([_bars_result(s, y) for s, y in secs], tmp_path)
-    staging.write_gold(_features_result([(1, "AAPL")]), tmp_path)  # MSFT gold missing
-    staging.write_universe(_universe_result(secs), tmp_path)
+    staging.write_gold(_features_result([(1, "AAPL")]), tmp_path)   # MSFT gold missing
+    staging.write_universe_history(_intervals(secs), tmp_path)
     staging.write_macro([_macro_result()], tmp_path)
 
     data = reader.read_pulled_data(tmp_path, AS_OF, "SP500", features_unresolved=[])
     req = SnapshotRequest(as_of=AS_OF, universe_code="SP500",
-                          start=date(2008, 6, 2), end=date(2008, 6, 4),
                           feature_versions=[{"name": "momentum_12_1", "version": 1}],
                           macro_series=["CPIAUCSL"], requested_symbols=None)
     blocking = blocking_violations(run_all_checks(data, req))

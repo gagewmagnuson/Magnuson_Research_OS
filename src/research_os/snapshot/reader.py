@@ -58,10 +58,21 @@ def read_pulled_data(staging_dir: Path, as_of: date, universe_code: str,
     gold = [GoldSeries(sid, sym, sess)
             for sid, (sym, sess) in _sessions_by_security(gold_df).items()]
 
+    # universe.parquet is now the INTERVAL history (one row per membership
+    # interval). For completeness, "member" = each DISTINCT security_id in the
+    # history (survivorship-free population). We collapse intervals to distinct
+    # securities, carrying a representative ticker for diagnostics. (R1 uses the
+    # full intervals directly from the parquet for PIT membership resolution.)
     members = []
     if univ_df.height:
+        seen = set()
         for r in univ_df.iter_rows(named=True):
-            members.append(UniverseMember(int(r["security_id"]), r.get("symbol")))
+            sid = int(r["security_id"])
+            if sid in seen:
+                continue
+            seen.add(sid)
+            symbol = r.get("ticker") if "ticker" in univ_df.columns else r.get("symbol")
+            members.append(UniverseMember(sid, symbol))
 
     macro = []
     if macro_df.height:

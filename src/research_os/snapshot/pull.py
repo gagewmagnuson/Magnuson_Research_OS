@@ -91,52 +91,82 @@ def pull_snapshot(
     pulled_at = datetime.now(timezone.utc)
     pull_warnings: list[Violation] = []
 
-    # 1. Universe membership as_of.
-    universe = client.universe(request.universe_code, request.as_of)
-    member_by_symbol = {m["symbol"]: m["security_id"] for m in universe.members if m.get("symbol")}
+    # 1. FULL membership interval history (survivorship-free): every security ever
+    #    a member of the index, including delisted ones, with its PIT ticker per
+    #    interval. Identity is security_id; ticker is only the key for the
+    #    symbol-based bars/features endpoints (RD-014, survivorship correctness).
+    history = client.universe_history(request.universe_code, request.as_of)
+    intervals = history.intervals            # each: security_id, valid_from, valid_to, ticker
 
-    # Population is ALWAYS the PIT universe membership (RD-014). requested_symbols
-    # is only a DEV-SLICE RESTRICTION of that population — never an independent
-    # population definition. A requested symbol that is not a member as_of the
-    # date is not in the universe, so it is dropped with a warning rather than
-    # pulled as orphan data. This keeps dev and production on the identical
-    # population-selection path, differing only in size.
-    all_members = sorted(member_by_symbol)
+    # One fetch-ticker per security_id (any valid ticker returns that security's
+    # full history; identity is verified on fetch regardless). Prefer a ticker
+    # from an interval that actually has one.
+    ticker_by_secid: dict[int, str] = {}
+    for iv in intervals:
+        sid = iv["security_id"]
+        if sid not in ticker_by_secid and iv.get("ticker"):
+            ticker_by_secid[sid] = iv["ticker"]
+
+    all_secids = sorted({iv["security_id"] for iv in intervals})
+
+    # requested_symbols is a DEV-SLICE restriction only (by ticker), never an
+    # independent population. Population is ALWAYS the full membership history.
     if request.requested_symbols:
         requested = set(request.requested_symbols)
-        symbols = [s for s in all_members if s in requested]
-        dropped = requested - set(all_members)
-        for s in sorted(dropped):
+        population = [sid for sid in all_secids
+                      if ticker_by_secid.get(sid) in requested]
+        matched_tickers = {ticker_by_secid.get(sid) for sid in population}
+        for t in sorted(requested - matched_tickers):
             pull_warnings.append(Violation(
                 Tier.REQUEST_DERIVED, Severity.WARNING, "requested_symbol_not_member",
-                f"dev-slice requested symbol {s} is not a member of "
-                f"{request.universe_code} as_of {request.as_of}; excluded from the "
-                f"snapshot (population is defined by PIT membership, RD-014)",
-                domain="universe", symbol=s))
+                f"dev-slice requested symbol {t} is not in the membership history "
+                f"of {request.universe_code}; excluded (population is the PIT "
+                f"membership history, RD-014)",
+                domain="universe", symbol=t))
     else:
-        symbols = all_members
+        population = all_secids
 
-    # 2. Per-symbol bars + features, tagged with identity.
+    # 2. Per-security bars + features, fetched by ticker but KEYED and VERIFIED on
+    #    security_id. If a (future) reused ticker returns a different security_id
+    #    than intended, that is a HARD ticker_identity_mismatch — the snapshot must
+    #    never silently ingest another security's data as the intended one.
     bars_results = []
     gold_results = []
     all_unresolved: list[str] = []
-    for sym in symbols:
-        sid = member_by_symbol.get(sym)
-        # bars (has identity on envelope already)
-        # Full history as of the knowledge cutoff (ARCHITECTURE §3): no session
-        # window. The Trading OS returns every session up to as_of.
-        b = client.bars(sym, as_of=request.as_of, adjustment="total_return")
-        bars_results.append(b)
-        # features (data-only) -> tag with this symbol's identity
-        f = client.features(as_of=request.as_of, symbols=[sym])
-        all_unresolved.extend(f.unresolved)
-        # use the bars security_id if the member map lacked it
-        sid = sid if sid is not None else b.security_id
-        gold_results.append(_tag_gold_rows(f, sid, sym))
+    for sid in population:
+        ticker = ticker_by_secid.get(sid)
+        if not ticker:
+            # A member with no resolvable ticker cannot be fetched via the
+            # symbol-keyed endpoints. Hard failure — do not silently drop a member.
+            raise SnapshotPullAborted([Violation(
+                Tier.CROSS_DOMAIN, Severity.HARD, "member_no_ticker",
+                f"security_id {sid} is in the membership history but has no "
+                f"resolvable ticker to fetch its data",
+                domain="universe", security_id=sid)])
 
-    # Merge per-symbol gold into one FeaturesResult for staging.
+        b = client.bars(ticker, as_of=request.as_of, adjustment="total_return")
+        # IDENTITY VERIFICATION (ticker-reuse guard): the returned security_id must
+        # equal the intended one. A mismatch means the ticker now resolves to a
+        # different security — fail closed, never corrupt the snapshot.
+        if b.security_id != sid:
+            raise SnapshotPullAborted([Violation(
+                Tier.CROSS_DOMAIN, Severity.HARD, "ticker_identity_mismatch",
+                f"intended security_id {sid} via ticker {ticker!r} but bars "
+                f"returned security_id {b.security_id}; refusing to ingest another "
+                f"security's data (possible ticker reuse)",
+                domain="bars", security_id=sid, symbol=ticker,
+                expected=sid, observed=b.security_id)])
+        bars_results.append(b)
+
+        f = client.features(as_of=request.as_of, symbols=[ticker])
+        all_unresolved.extend(f.unresolved)
+        gold_results.append(_tag_gold_rows(f, sid, ticker))
+
+    # Merge per-security gold into one FeaturesResult for staging.
     merged_gold = FeaturesResult(
-        as_of=str(request.as_of), symbols=symbols, unresolved=all_unresolved,
+        as_of=str(request.as_of),
+        symbols=[ticker_by_secid.get(sid) for sid in population],
+        unresolved=all_unresolved,
         count=sum(g.count for g in gold_results),
         rows=[r for g in gold_results for r in g.rows],
     )
@@ -166,19 +196,16 @@ def pull_snapshot(
     # 5. Stage to a temp dir.
     staging_dir = Path(tempfile.mkdtemp(prefix="snapshot_staging_"))
     try:
-        # The universe written to the snapshot must match the pulled population.
-        # For a dev slice, restrict membership to the pulled symbols so the snapshot
-        # is internally consistent (members == securities with bars/gold). For a
-        # full pull, symbols == all members, so this is a no-op.
-        pulled_symbol_set = set(symbols)
-        restricted_universe = UniverseResult(
-            index=universe.index, as_of=universe.as_of,
-            count=sum(1 for m in universe.members if m.get("symbol") in pulled_symbol_set),
-            members=[m for m in universe.members if m.get("symbol") in pulled_symbol_set],
-        )
+        # universe.parquet = the full membership INTERVAL history for the pulled
+        # population, keyed on security_id (survivorship-free). R1 reconstructs PIT
+        # membership locally by interval containment — never calling back to the
+        # Trading OS. For a dev slice, restrict intervals to the pulled securities;
+        # for a full pull, that's all of them.
+        pop_set = set(population)
+        pulled_intervals = [iv for iv in intervals if iv["security_id"] in pop_set]
         staging.write_bars(bars_results, staging_dir)
         staging.write_gold(merged_gold, staging_dir)
-        staging.write_universe(restricted_universe, staging_dir)
+        staging.write_universe_history(pulled_intervals, staging_dir)
         staging.write_macro(macro_results, staging_dir)
 
         # 6. Read the STAGED artifact back.

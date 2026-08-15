@@ -48,6 +48,18 @@ class FakeClient:
         return UniverseResult(index=index, as_of=str(as_of), count=len(self._members),
                               members=[{"security_id": s, "symbol": y} for s, y in self._members])
 
+    def universe_history(self, index, as_of):
+        # Each member -> one membership interval, keyed on security_id, with the
+        # ticker as fetch-convenience. Mirrors the production /history contract.
+        from research_os.trading_os_client.client import UniverseHistoryResult
+        intervals = [{"security_id": s, "valid_from": "2000-01-01",
+                      "valid_to": None, "ticker": y} for s, y in self._members]
+        return UniverseHistoryResult(
+            index=index, as_of=str(as_of),
+            interval_count=len(intervals),
+            security_count=len({iv["security_id"] for iv in intervals}),
+            intervals=intervals)
+
     def bars(self, symbol, as_of, start=None, end=None, adjustment=None):
         sid = self._sec_by_symbol[symbol]
         sessions = [] if symbol in self._no_bars else SESS
@@ -203,3 +215,49 @@ def test_registration_failure_orphans_and_names(tmp_path, monkeypatch):
     assert err.content_hash and len(err.content_hash) == 64
     assert err.manifest["scope"]["universe_code"] == "SP500"
     assert "orphan" in str(err).lower()
+
+
+def test_full_history_population_is_not_survivor_only(tmp_path, monkeypatch, rolled_back_conn):
+    """The survivorship guarantee: the pull population is EVERY security in the
+    membership history, including a delisted one that is NOT a current member.
+    A delisted security (id 3, ticker DEAD) present in the interval history must
+    be pulled and staged — proving survivor-only population is impossible."""
+    members = [(1, "AAPL"), (2, "MSFT"), (3, "DEAD")]   # 3 = delisted ex-member
+    captured = {}
+    real_read = pull_mod.reader.read_pulled_data
+    def spy(sd, *a, **k):
+        d = real_read(sd, *a, **k); captured["d"] = d; return d
+    monkeypatch.setattr(pull_mod.reader, "read_pulled_data", spy)
+
+    pull_snapshot(_req(), FakeClient(members), tmp_path,
+                  code_sha="test", conn=rolled_back_conn)
+
+    # all three securities — including the delisted one — are in the pulled data
+    assert {g.security_id for g in captured["d"].gold} == {1, 2, 3}
+    assert {m.security_id for m in captured["d"].members} == {1, 2, 3}
+    # the delisted security's data is present, keyed on its stable security_id
+    assert 3 in {b.security_id for b in captured["d"].bars}
+
+
+def test_ticker_reuse_identity_mismatch_aborts(tmp_path, rolled_back_conn):
+    """Ticker-reuse-safe against silent identity corruption: if a ticker resolves
+    (via the symbol-keyed bars endpoint) to a DIFFERENT security_id than the one
+    intended from the membership history, the pull must HARD-fail rather than
+    silently ingest another security's data as the intended security."""
+    class ReusedTickerClient(FakeClient):
+        def bars(self, symbol, as_of, start=None, end=None, adjustment=None):
+            b = super().bars(symbol, as_of, start, end, adjustment)
+            if symbol == "MSFT":     # simulate reuse: MSFT now resolves to security 900
+                return BarsResult(symbol=symbol, security_id=900, as_of=b.as_of,
+                                  count=b.count, bars=b.bars)
+            return b
+
+    before = _snapshot_count(rolled_back_conn)
+    client = ReusedTickerClient(MEMBERS)   # history says MSFT -> security_id 2
+    with pytest.raises(SnapshotPullAborted) as exc:
+        pull_snapshot(_req(), client, tmp_path, code_sha="test", conn=rolled_back_conn)
+    mism = [v for v in exc.value.violations if v.issue == "ticker_identity_mismatch"]
+    assert mism, "expected a ticker_identity_mismatch violation"
+    assert mism[0].expected == 2 and mism[0].observed == 900   # intended 2, got 900
+    assert mism[0].severity.value == "hard"
+    assert _snapshot_count(rolled_back_conn) == before          # nothing registered
