@@ -131,19 +131,39 @@ def check_request_derived(data: PulledData, request: SnapshotRequest) -> list[Vi
 
 # --- Tier 3: cross-domain (bars as reference) --------------------------------
 
-def check_cross_domain(data: PulledData, request: SnapshotRequest) -> list[Violation]:
+def check_cross_domain(data: PulledData, request: SnapshotRequest,
+                       known_no_data: frozenset[int] = frozenset()) -> list[Violation]:
     """Domains agree, with BARS AS THE REFERENCE. Every session present in bars
     for a security must have a corresponding gold session; every universe member
-    must have bars. This is the check that catches the gold-lake failure class."""
-    v: list[Violation] = []
+    must have bars. This is the check that catches the gold-lake failure class.
 
+    `known_no_data` is the governed set of security_ids explicitly recorded (in
+    research.known_no_data_security) as having no available price data. A member
+    with zero bars is an ACCEPTED GOVERNED EXCEPTION if in that set, and a HARD
+    gap otherwise — the three-state rule that keeps this from becoming a
+    silent-drop loophole while still catching unexpected gaps."""
+    v: list[Violation] = []
     gold_by_sec = {g.security_id: set(g.session_dates) for g in data.gold}
     bars_by_sec = {b.security_id: b for b in data.bars}
 
-    # (a) universe members must have bars.
+    # (a) universe members must have bars — UNLESS the member is a governed
+    #     no-data exception. Three states: bars present -> normal; no bars +
+    #     governed -> accepted exception (non-blocking, recorded distinctly);
+    #     no bars + not governed -> HARD (unexpected gap).
     bars_sec_ids = set(bars_by_sec)
     for m in data.members:
-        if m.security_id not in bars_sec_ids:
+        if m.security_id in bars_sec_ids:
+            continue
+        if m.security_id in known_no_data:
+            v.append(Violation(
+                Tier.CROSS_DOMAIN, Severity.WARNING, "member_no_data_governed",
+                f"{_sym(m.security_id, m.symbol)} is a universe member with no "
+                f"price data — a KNOWN, governed data-availability exception "
+                f"(research.known_no_data_security); accepted, not a gap. The "
+                f"member remains in the membership history (survivorship-correct).",
+                domain="bars", security_id=m.security_id, symbol=m.symbol,
+                expected="governed no-data exception", observed=0))
+        else:
             v.append(Violation(
                 Tier.CROSS_DOMAIN, Severity.HARD, "member_missing_bars",
                 f"{_sym(m.security_id, m.symbol)} is a universe member as_of "
@@ -219,12 +239,17 @@ def check_empirical_sanity(data: PulledData, request: SnapshotRequest,
 # --- aggregate ----------------------------------------------------------------
 
 def run_all_checks(data: PulledData, request: SnapshotRequest,
-                   governed_min_members: int | None = None) -> list[Violation]:
-    """Run all four tiers, return all violations (hard + warning)."""
+                   governed_min_members: int | None = None,
+                   known_no_data: frozenset[int] = frozenset()) -> list[Violation]:
+    """Run all four tiers, return all violations (hard + warning).
+
+    `known_no_data` (security_ids from research.known_no_data_security) is passed
+    in by orchestration — the pure check never queries the DB itself, preserving
+    reproducibility and testability."""
     return (
         check_structural(data, request)
         + check_request_derived(data, request)
-        + check_cross_domain(data, request)
+        + check_cross_domain(data, request, known_no_data)
         + check_empirical_sanity(data, request, governed_min_members)
     )
 

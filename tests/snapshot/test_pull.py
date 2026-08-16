@@ -39,6 +39,7 @@ class FakeClient:
                  unresolved_for=None, missing_macro=None):
         self._members = members
         self._sec_by_symbol = {y: s for s, y in members}
+        self._symbol_by_sec = {s: y for s, y in members}
         self._no_bars = set(no_bars_for or [])
         self._bad_gold = set(bad_gold_for or [])
         self._unresolved = set(unresolved_for or [])
@@ -62,7 +63,15 @@ class FakeClient:
 
     def bars(self, symbol, as_of, start=None, end=None, adjustment=None):
         sid = self._sec_by_symbol[symbol]
-        sessions = [] if symbol in self._no_bars else SESS
+        return self._bars_for(sid, symbol, as_of)
+
+    def bars_by_id(self, security_id, as_of, adjustment=None):
+        symbol = self._symbol_by_sec.get(security_id)
+        return self._bars_for(security_id, symbol, as_of)
+
+    def _bars_for(self, sid, symbol, as_of):
+        no_bars = symbol in self._no_bars if symbol is not None else False
+        sessions = [] if no_bars else SESS
         return BarsResult(symbol=symbol, security_id=sid, as_of=str(as_of),
                           count=len(sessions),
                           bars=[{"session_date": d, "open": 1.0, "high": 2.0, "low": 0.5,
@@ -70,7 +79,12 @@ class FakeClient:
                                  "knowledge_time": f"{d}T15:00:00-06:00"} for d in sessions])
 
     def features(self, as_of, symbols=None, start=None, end=None):
-        sym = symbols[0]
+        return self._features_for(self._sec_by_symbol.get(symbols[0]), symbols[0], as_of)
+
+    def features_by_id(self, security_id, as_of):
+        return self._features_for(security_id, self._symbol_by_sec.get(security_id), as_of)
+
+    def _features_for(self, sid, sym, as_of):
         if sym in self._unresolved:
             return FeaturesResult(as_of=str(as_of), symbols=[], unresolved=[sym], count=0, rows=[])
         # bad_gold -> gold has FEWER sessions than bars (drop one) -> gold != bars
@@ -239,25 +253,30 @@ def test_full_history_population_is_not_survivor_only(tmp_path, monkeypatch, rol
     assert 3 in {b.security_id for b in captured["d"].bars}
 
 
-def test_ticker_reuse_identity_mismatch_aborts(tmp_path, rolled_back_conn):
-    """Ticker-reuse-safe against silent identity corruption: if a ticker resolves
-    (via the symbol-keyed bars endpoint) to a DIFFERENT security_id than the one
-    intended from the membership history, the pull must HARD-fail rather than
-    silently ingest another security's data as the intended security."""
-    class ReusedTickerClient(FakeClient):
-        def bars(self, symbol, as_of, start=None, end=None, adjustment=None):
-            b = super().bars(symbol, as_of, start, end, adjustment)
-            if symbol == "MSFT":     # simulate reuse: MSFT now resolves to security 900
-                return BarsResult(symbol=symbol, security_id=900, as_of=b.as_of,
-                                  count=b.count, bars=b.bars)
-            return b
+def test_delisted_security_pulls_by_id_without_current_ticker(tmp_path, monkeypatch,
+                                                              rolled_back_conn):
+    """The by-id fetch path makes ticker reuse structurally irrelevant and lets a
+    DELISTED security pull cleanly: fetching is keyed on security_id, so a member
+    whose ticker no longer resolves at the current cutoff is still retrieved by
+    id. Here security 3's ticker is absent from the fetch map entirely (as if
+    delisted), yet its data is pulled and staged by security_id."""
+    members = [(1, "AAPL"), (2, "MSFT"), (3, "DEAD")]
+    captured = {}
+    real_read = pull_mod.reader.read_pulled_data
+    def spy(sd, *a, **k):
+        d = real_read(sd, *a, **k); captured["d"] = d; return d
+    monkeypatch.setattr(pull_mod.reader, "read_pulled_data", spy)
 
-    before = _snapshot_count(rolled_back_conn)
-    client = ReusedTickerClient(MEMBERS)   # history says MSFT -> security_id 2
-    with pytest.raises(SnapshotPullAborted) as exc:
-        pull_snapshot(_req(), client, tmp_path, code_sha="test", conn=rolled_back_conn)
-    mism = [v for v in exc.value.violations if v.issue == "ticker_identity_mismatch"]
-    assert mism, "expected a ticker_identity_mismatch violation"
-    assert mism[0].expected == 2 and mism[0].observed == 900   # intended 2, got 900
-    assert mism[0].severity.value == "hard"
-    assert _snapshot_count(rolled_back_conn) == before          # nothing registered
+    class DelistedClient(FakeClient):
+        """security 3 has no current-ticker symbol resolution (delisted), but
+        bars_by_id / features_by_id still return its data keyed on security_id."""
+        def bars(self, symbol, as_of, start=None, end=None, adjustment=None):
+            raise AssertionError("pull must fetch by id, not symbol")
+        def features(self, as_of, symbols=None, start=None, end=None):
+            raise AssertionError("pull must fetch by id, not symbol")
+
+    pull_snapshot(_req(), DelistedClient(members), tmp_path,
+                  code_sha="test", conn=rolled_back_conn)
+    # the delisted security (3) is present, keyed on its stable security_id
+    assert {g.security_id for g in captured["d"].gold} == {1, 2, 3}
+    assert 3 in {b.security_id for b in captured["d"].bars}

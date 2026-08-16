@@ -26,6 +26,7 @@ from research_os.trading_os_client.client import (
 from research_os.snapshot import staging, reader
 from research_os.snapshot.model import SnapshotRequest, PulledData
 from research_os.snapshot.completeness import run_all_checks, blocking_violations
+from research_os.snapshot.governance import load_known_no_data
 from research_os.snapshot.violation import Violation, Tier, Severity
 from research_os.snapshot.manifest import build_manifest, canonical_manifest_for_hash
 from research_os.snapshot.content_hash import compute_content_hash
@@ -134,33 +135,17 @@ def pull_snapshot(
     gold_results = []
     all_unresolved: list[str] = []
     for sid in population:
-        ticker = ticker_by_secid.get(sid)
-        if not ticker:
-            # A member with no resolvable ticker cannot be fetched via the
-            # symbol-keyed endpoints. Hard failure — do not silently drop a member.
-            raise SnapshotPullAborted([Violation(
-                Tier.CROSS_DOMAIN, Severity.HARD, "member_no_ticker",
-                f"security_id {sid} is in the membership history but has no "
-                f"resolvable ticker to fetch its data",
-                domain="universe", security_id=sid)])
-
-        b = client.bars(ticker, as_of=request.as_of, adjustment="total_return")
-        # IDENTITY VERIFICATION (ticker-reuse guard): the returned security_id must
-        # equal the intended one. A mismatch means the ticker now resolves to a
-        # different security — fail closed, never corrupt the snapshot.
-        if b.security_id != sid:
-            raise SnapshotPullAborted([Violation(
-                Tier.CROSS_DOMAIN, Severity.HARD, "ticker_identity_mismatch",
-                f"intended security_id {sid} via ticker {ticker!r} but bars "
-                f"returned security_id {b.security_id}; refusing to ingest another "
-                f"security's data (possible ticker reuse)",
-                domain="bars", security_id=sid, symbol=ticker,
-                expected=sid, observed=b.security_id)])
+        # Fetch by STABLE security_id — no ticker round-trip. This retrieves
+        # delisted members (whose historical ticker no longer resolves at the
+        # current cutoff) and is immune to ticker reuse, so no identity-mismatch
+        # guard is needed: we ask for sid, we get sid's data. The ticker is kept
+        # only as display metadata for the gold rows / universe.parquet.
+        display_ticker = ticker_by_secid.get(sid)
+        b = client.bars_by_id(sid, as_of=request.as_of, adjustment="total_return")
         bars_results.append(b)
-
-        f = client.features(as_of=request.as_of, symbols=[ticker])
+        f = client.features_by_id(sid, as_of=request.as_of)
         all_unresolved.extend(f.unresolved)
-        gold_results.append(_tag_gold_rows(f, sid, ticker))
+        gold_results.append(_tag_gold_rows(f, sid, display_ticker))
 
     # Merge per-security gold into one FeaturesResult for staging.
     merged_gold = FeaturesResult(
@@ -213,7 +198,13 @@ def pull_snapshot(
                                        request.universe_code, all_unresolved)
 
         # 7. Completeness. Abort on any blocking violation — nothing registered.
-        all_v = run_all_checks(data, request, governed_min_members)
+        # Governed no-data exceptions (research.known_no_data_security): members
+        # legitimately having no price data. Loaded here in orchestration and
+        # passed into the pure checks so a known no-bars member is an accepted
+        # exception, not a hard gap — while unexpected gaps still hard-fail.
+        known_no_data = load_known_no_data(request.universe_code)
+        all_v = run_all_checks(data, request, governed_min_members,
+                               known_no_data=known_no_data)
         blocking = blocking_violations(all_v)
         if blocking:
             raise SnapshotPullAborted(blocking)

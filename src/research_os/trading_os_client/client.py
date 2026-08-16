@@ -122,6 +122,25 @@ class TradingOsClient:
         return BarsResult(symbol=d["symbol"], security_id=d["security_id"],
                           as_of=d["as_of"], count=d["count"], bars=d["bars"])
 
+    def bars_by_id(self, security_id: int, as_of: date | str,
+                   adjustment: str | None = None) -> BarsResult:
+        """Fetch bars by STABLE security_id — retrieves delisted securities at a
+        current cutoff (their historical ticker no longer resolves) and is immune
+        to ticker reuse. This is the snapshot's fetch path."""
+        params = {"as_of": self._fmt(as_of)}
+        if adjustment:
+            params["adjustment"] = adjustment
+        d = self._get(f"/v1/bars/by-id/{security_id}", params)
+        return BarsResult(symbol=d.get("symbol"), security_id=d["security_id"],
+                          as_of=d["as_of"], count=d["count"], bars=d["bars"])
+
+    def features_by_id(self, security_id: int, as_of: date | str) -> FeaturesResult:
+        """Fetch gold features by STABLE security_id (see bars_by_id)."""
+        d = self._get(f"/v1/features/by-id/{security_id}", {"as_of": self._fmt(as_of)})
+        return FeaturesResult(as_of=d["as_of"], symbols=d.get("symbols"),
+                              unresolved=d.get("unresolved", []),
+                              count=d["count"], rows=d["rows"])
+
     def features(self, as_of: date | str, symbols: list[str] | None = None,
                  start: date | str | None = None, end: date | str | None = None) -> FeaturesResult:
         params: dict[str, Any] = {"as_of": self._fmt(as_of)}

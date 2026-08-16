@@ -58,7 +58,15 @@ def build_manifest(
             "bars_sessions_total": sum(len(b.session_dates) for b in data.bars),
             "gold_sessions_total": sum(len(g.session_dates) for g in data.gold),
         },
-        "accepted_warnings": [_violation_dict(w) for w in warnings],
+        # Governed exceptions (e.g. member_no_data_governed) are semantically
+        # distinct from empirical warnings: they are known, investigated, human-
+        # governed data-availability facts, not "this looks unusual" flags. They
+        # get their own manifest field so an auditor can tell "known and accepted"
+        # from "flagged as odd" at a glance.
+        "governed_exceptions": [_violation_dict(w) for w in warnings
+                                if w.issue == "member_no_data_governed"],
+        "accepted_warnings": [_violation_dict(w) for w in warnings
+                              if w.issue != "member_no_data_governed"],
         "producer_dq": producer_dq,
         "pull": {
             "pulled_at": pulled_at.isoformat(),
@@ -76,6 +84,7 @@ def canonical_manifest_for_hash(manifest: dict[str, Any]) -> dict[str, Any]:
     """
     import copy
     m = copy.deepcopy(manifest)
-    for w in m.get("accepted_warnings", []):
-        w.pop("message", None)
+    for field in ("accepted_warnings", "governed_exceptions"):
+        for w in m.get(field, []):
+            w.pop("message", None)
     return m
